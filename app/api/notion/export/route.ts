@@ -1,0 +1,19 @@
+import {auth} from "@clerk/nextjs/server";
+import {fetchQuery} from "convex/nextjs";
+import {api} from "@/convex/_generated/api";
+import type {Id} from "@/convex/_generated/dataModel";
+import type {MissionDraft} from "@/lib/mission";
+import {NextRequest,NextResponse} from "next/server";
+export const runtime="nodejs";
+// Limit Notion rich-text chunks to <= 2000 characters (API limit), splitting long fields safely.
+const rt=(value:string)=>[{type:"text",text:{content:value.slice(0,1900)||" "}}];
+const block=(type:"paragraph"|"heading_2"|"heading_3"|"bulleted_list_item",value:string)=>({object:"block",type,[type]:{rich_text:rt(value)}});
+function content(m:MissionDraft){const list:ReturnType<typeof block>[]=[];const add=(h:string,body:string)=>{list.push(block("heading_2",h));for(let i=0;i<Math.max(1,Math.ceil(body.length/1800));i++)list.push(block("paragraph",body.slice(i*1800,(i+1)*1800)));};
+ add("Mission overview",`ID: ${m.code} | Status: ${m.status} | District: ${m.district} | Duration: ${m.duration} minutes\n${m.summary}`);add("Narrative premise",m.premise);
+ list.push(block("heading_2","Objectives"));for(const o of m.objectives){list.push(block("heading_3",`${o.id}: ${o.title}`));for(const [label,value] of [["Type",o.kind],["Experience",o.description],["Entry",o.entry],["Completion",o.completion],["Failure",o.failure],["Checkpoint",o.checkpoint?"Yes":"No"]])list.push(block("bulleted_list_item",`${label}: ${value}`));}
+ list.push(block("heading_2","Screenplay"));for(const s of m.scenes){list.push(block("heading_3",s.slug));for(const value of [s.stage,s.dialogue])for(let i=0;i<Math.max(1,Math.ceil(value.length/1800));i++)list.push(block("paragraph",value.slice(i*1800,(i+1)*1800)));}
+ list.push(block("heading_2","Player decisions"));for(const c of m.choices){list.push(block("heading_3",c.prompt));list.push(block("bulleted_list_item",`A: ${c.optionA} — ${c.consequenceA}`));list.push(block("bulleted_list_item",`B: ${c.optionB} — ${c.consequenceB}`));}
+ add("QA acceptance criteria",m.qa);add("Production notes",m.notes);return list;
+}
+export async function POST(request:NextRequest){const {userId,getToken}=await auth();if(!userId)return NextResponse.json({error:"Authentication required"},{status:401});const token=process.env.NOTION_INTEGRATION_TOKEN;const parent=process.env.NOTION_PARENT_PAGE_ID;if(!token||!parent)return NextResponse.json({error:"Configure NOTION_INTEGRATION_TOKEN and NOTION_PARENT_PAGE_ID"},{status:503});let id:string;try{const body=await request.json();id=body.missionId;if(typeof id!=="string"||!/^[a-z0-9]+$/i.test(id))throw new Error();}catch{return NextResponse.json({error:"Invalid mission ID"},{status:400})}
+ try{const jwt=await getToken({template:"convex"});if(!jwt)return NextResponse.json({error:"Convex authentication not configured"},{status:401});const mission=await fetchQuery(api.missions.get,{id:id as Id<"missions">},{token:jwt});if(!mission)return NextResponse.json({error:"Mission not found"},{status:404});const blocks=content(mission);if(blocks.length>100)return NextResponse.json({error:"Mission exceeds 100 Notion blocks; shorten or split it"},{status:413});const response=await fetch("https://api.notion.com/v1/pages",{method:"POST",headers:{Authorization:`Bearer ${token}`,"Notion-Version":"2026-03-11","Content-Type":"application/json"},body:JSON.stringify({parent:{type:"page_id",page_id:parent},properties:{title:{type:"title",title:rt(`${mission.code} — ${mission.title}`)}},children:blocks}),signal:AbortSignal.timeout(15000)});const result=await response.json();if(!response.ok)return NextResponse.json({error:result?.message??"Notion rejected export"},{status:response.status===429?429:502});return NextResponse.json({url:result.url,pageId:result.id});}catch(e){console.error("Notion export failed",e);return NextResponse.json({error:"Unable to export. Verify your integration and parent-page access."},{status:500});}}

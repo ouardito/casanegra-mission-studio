@@ -1,0 +1,10 @@
+import { v, ConvexError } from "convex/values";
+import { mutation, query } from "./_generated/server";
+import { mission } from "./schema";
+async function owner(ctx: {auth: {getUserIdentity(): Promise<{subject:string}|null>}}) { const identity=await ctx.auth.getUserIdentity(); if(!identity) throw new ConvexError("Sign in required"); return identity.subject; }
+export const list=query({args:{},handler:async(ctx)=>{const user=await owner(ctx);return ctx.db.query("missions").withIndex("by_owner",q=>q.eq("ownerId",user)).order("desc").collect();}});
+export const get=query({args:{id:v.id("missions")},handler:async(ctx,args)=>{const user=await owner(ctx);const item=await ctx.db.get(args.id);return item?.ownerId===user?item:null;}});
+export const create=mutation({args:{draft:v.object(mission)},handler:async(ctx,{draft})=>{const user=await owner(ctx);if(draft.title.length>150||draft.objectives.length>100)throw new ConvexError("Mission limit exceeded");return ctx.db.insert("missions",{...draft,ownerId:user,updatedAt:Date.now()});}});
+export const update=mutation({args:{id:v.id("missions"),draft:v.object(mission)},handler:async(ctx,{id,draft})=>{const user=await owner(ctx);const old=await ctx.db.get(id);if(!old||old.ownerId!==user)throw new ConvexError("Mission not found");if(draft.title.length>150||draft.objectives.length>100)throw new ConvexError("Mission limit exceeded");await ctx.db.patch(id,{...draft,updatedAt:Date.now()});}});
+export const remove=mutation({args:{id:v.id("missions")},handler:async(ctx,{id})=>{const user=await owner(ctx);const old=await ctx.db.get(id);if(!old||old.ownerId!==user)throw new ConvexError("Mission not found");await ctx.db.delete(id);}});
+export const recordNotion=mutation({args:{id:v.id("missions"),pageId:v.string(),url:v.string()},handler:async(ctx,{id,pageId,url})=>{const user=await owner(ctx);const old=await ctx.db.get(id);if(!old||old.ownerId!==user)throw new ConvexError("Mission not found");await ctx.db.patch(id,{notionPageId:pageId,notionUrl:url});}});
